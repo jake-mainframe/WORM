@@ -1,0 +1,1472 @@
+*PROCESS A,X,S,M,NEST,OP,AG,FLAG(I),LIMITS(EXTNAME(31)),INTERRUPT;
+*PROCESS PREFIX(NOFIXEDOVERFLOW,SUBSCRIPTRANGE),LANGLVL(SAA2);
+ WORM:    PROCEDURE (INPARM)  OPTIONS (MAIN);
+
+          DCL INPARM   CHAR(100) CONNECTED VARYING;
+
+          DCL SYSPRINT FILE STREAM OUTPUT;
+          DCL SYSIN    FILE STREAM INPUT;
+
+          DEFAULT RANGE(*) STATIC FIXED;
+
+          DCL DOSBEEP  ENTRY
+                       (FIXED BIN(31), FIXED BIN(31))   /* TONE, TIME */
+                       RETURNS(FIXED BIN(31) OPTIONAL)  /* IGNORE     */
+                       OPTIONS( BYVALUE LINKAGE(SYSTEM) )
+                       EXTERNAL;
+
+          DCL DOSSLEEP ENTRY ( FIXED BIN(31) )          /* TIME (MS)  */
+                       RETURNS(FIXED BIN(31) OPTIONAL)  /* IGNORE     */
+                       OPTIONS( BYVALUE LINKAGE(SYSTEM) )
+                       EXTERNAL;
+
+          DCL KBD16CHARIN ENTRY (
+                       CHARACTER(10) BYADDR,            /* KEY DATA   */
+                       FIXED BIN(16) UNSIGNED,          /* WAIT FLAG  */
+                       FIXED BIN(16) UNSIGNED)          /* KBD HANDLE */
+                       RETURNS(OPTIONAL BYVALUE FIXED BIN(16) UNSIGNED)
+                       OPTIONS(BYVALUE NODESCRIPTOR LINKAGE(PASCAL16))
+                       EXTERNAL;
+
+          DCL KBD16FLUSHBUFFER ENTRY (
+                       FIXED BIN(16) UNSIGNED)          /* KBD HANDLE */
+                       RETURNS(OPTIONAL BYVALUE FIXED BIN(16) UNSIGNED)
+                       OPTIONS(BYVALUE NODESCRIPTOR LINKAGE(PASCAL16))
+                       EXTERNAL;
+
+          DCL VIO16WRTNCELL ENTRY (
+                       CHARACTER(2) BYADDR,
+                       FIXED BIN(16) UNSIGNED,          /* TIMES      */
+                       FIXED BIN(16) UNSIGNED,          /* ROW        */
+                       FIXED BIN(16) UNSIGNED,          /* COLUMN     */
+                       FIXED BIN(16) UNSIGNED)          /* VIO HANDLE */
+                       RETURNS(OPTIONAL BYVALUE FIXED BIN(16) UNSIGNED)
+                       OPTIONS(BYVALUE NODESCRIPTOR LINKAGE(PASCAL16))
+                       EXTERNAL;
+
+          DCL VIO16WRTCELLSTR ENTRY (
+                       CHARACTER(2) BYADDR,
+                       FIXED BIN(16) UNSIGNED,          /* LENGTH     */
+                       FIXED BIN(16) UNSIGNED,          /* ROW        */
+                       FIXED BIN(16) UNSIGNED,          /* COLUMN     */
+                       FIXED BIN(16) UNSIGNED)          /* VIO HANDLE */
+                       RETURNS(OPTIONAL BYVALUE FIXED BIN(16) UNSIGNED)
+                       OPTIONS(BYVALUE NODESCRIPTOR LINKAGE(PASCAL16))
+                       EXTERNAL;
+
+          DCL VIO16WRTCHARSTR ENTRY (
+                       CHARACTER(160) BYADDR,
+                       FIXED BIN(16) UNSIGNED,          /* LENGTH     */
+                       FIXED BIN(16) UNSIGNED,          /* ROW        */
+                       FIXED BIN(16) UNSIGNED,          /* COLUMN     */
+                       FIXED BIN(16) UNSIGNED)          /* VIO HANDLE */
+                       RETURNS(OPTIONAL BYVALUE FIXED BIN(16) UNSIGNED)
+                       OPTIONS(BYVALUE NODESCRIPTOR LINKAGE(PASCAL16))
+                       EXTERNAL;
+
+          DCL VIO16WRTCHARSTRATT ENTRY (
+                       CHARACTER(1920) BYADDR,
+                       FIXED BIN(16) UNSIGNED,          /* LENGTH     */
+                       FIXED BIN(16) UNSIGNED,          /* ROW        */
+                       FIXED BIN(16) UNSIGNED,          /* COLUMN     */
+                       CHARACTER(1) BYADDR,             /* ATTRIBUTES */
+                       FIXED BIN(16) UNSIGNED)          /* VIO HANDLE */
+                       RETURNS(OPTIONAL BYVALUE FIXED BIN(16) UNSIGNED)
+                       OPTIONS(BYVALUE NODESCRIPTOR LINKAGE(PASCAL16))
+                       EXTERNAL;
+
+          DCL VIO16WRTTTY ENTRY (
+                       CHARACTER(160) BYADDR,
+                       FIXED BIN(16) UNSIGNED,          /* LENGTH     */
+                       FIXED BIN(16) UNSIGNED)          /* VIO HANDLE */
+                       RETURNS(OPTIONAL BYVALUE FIXED BIN(16) UNSIGNED)
+                       OPTIONS(BYVALUE NODESCRIPTOR LINKAGE(PASCAL16))
+                       EXTERNAL;
+
+          DCL API16RC        FIXED BINARY(16) UNSIGNED;
+
+          DCL KBDDATA        CHARACTER(10) STATIC INIT(LOW(10));
+
+          DCL 1 #KBDKEYINFO  UNALIGNED BASED(ADDR(KBDDATA)),
+                2 CHCHAR     CHARACTER(1),
+                2 CHSCAN     FIXED BIN(8) UNSIGNED,
+                2 FBSTATUS   FIXED BIN(8) UNSIGNED,
+                2 BNLSSHIFT  FIXED BIN(8) UNSIGNED,
+                2 FSSTATE    FIXED BIN(16) UNSIGNED,
+                2 KBDTIME    FIXED BIN(31) SIGNED;
+
+          DCL KBDWAIT        FIXED BIN(16) UNSIGNED;
+
+          DCL IO_WAIT        FIXED BIN(16) UNSIGNED VALUE(0);
+          DCL IO_NOWAIT      FIXED BIN(16) UNSIGNED VALUE(1);
+          DCL IO_PEEK        FIXED BIN(16) UNSIGNED VALUE(2);
+          DCL IO_PEEKWAIT    FIXED BIN(16) UNSIGNED VALUE(3);
+
+          DCL VIOLINE      CHARACTER(160);
+          DCL VIOCELL      CHARACTER(2) DEFINED VIOLINE;
+          DCL VIOCHAR      CHARACTER(1) DEFINED VIOLINE;
+          DCL SCORVALU     PICTURE'9999' DEFINED VIOLINE;
+
+          DCL FUTRMOVE     PICTURE'ZZZZ9';
+          DCL FUTRTEST     PICTURE'ZZZZZZZZZ9';
+
+          DCL MODE         CHAR(4) STATIC INIT('WORM');   /* NOT TEST */
+          DCL SIZE         CHAR(4) STATIC INIT('FULL'); /* NOT ½ OR ¼ */
+          DCL MAXDEPTH     FIXED BIN(15) STATIC INIT(22);
+          DCL COLORBIN     FIXED BIN(8) UNSIGNED;
+          DCL COLRCHAR     CHAR(1)  BASED(ADDR(COLORBIN));   /* WHITE */
+          DCL FOODCOLR     CHAR(1)  STATIC INIT('0F'X);      /* WHITE */
+          DCL WORMCOLR     CHAR(1)  STATIC INIT('00'X);      /* BLACK */
+          DCL DIRCTION     CHAR(1)  STATIC INIT('00'X);      /* STILL */
+          DCL PREVMOVE     CHAR(1)  STATIC INIT('6F'X);      /* RIGHT */
+          DCL PMPKNMSG     CHAR(44) STATIC INIT
+               (' CAREFUL!!  YOU MIGHT TURN INTO A PUMPKIN...');
+          DCL ACRNMMSG     CHAR(40) STATIC INIT
+               ('(WORM=WONDERFUL-ONLINE-RESPONSE-MONITOR)');
+          DCL AMAZEMSG     CHAR(56) STATIC INIT
+          ('WOW!!!  END-OF-GAME FORCED BY A COMPLETELY FULL SCREEN!!');
+          DCL PAUSEMSG     CHAR(56) STATIC INIT
+          ('NO SCORING.  HIT ENTER FOR STATS OR CONTROL-C TO CANCEL.');
+          DCL STARTHDR     CHAR(50) STATIC INIT
+          ('CURRENT-SCORE=0000   F1=AUTO   F3=END   F12=CANCEL');
+
+          DCL TIMECHAR     CHAR(9);
+          DCL 1 TIMEDIGITS DEFINED  TIMECHAR,
+                2 HOURS             PIC'99',
+                2 MINUTES           PIC'99',
+                2 SECONDS           PIC'99999';
+
+          DCL DFLTATTR     CHAR(1)  VALUE('07'X);
+          DCL HDGCOLOR     CHAR(1)  VALUE('2E'X);
+          DCL BLACK        CHAR(1)  VALUE('00'X);
+          DCL DKBLUE       CHAR(1)  VALUE('01'X);
+          DCL DKGREEN      CHAR(1)  VALUE('02'X);
+          DCL DKCYAN       CHAR(1)  VALUE('03'X);
+          DCL DKRED        CHAR(1)  VALUE('04'X);
+          DCL DKPINK       CHAR(1)  VALUE('05'X);
+          DCL ORANGE       CHAR(1)  VALUE('06'X);
+          DCL LTGREY       CHAR(1)  VALUE('07'X);
+          DCL DKGREY       CHAR(1)  VALUE('08'X);
+          DCL BLUE         CHAR(1)  VALUE('09'X);
+          DCL GREEN        CHAR(1)  VALUE('0A'X);
+          DCL CYAN         CHAR(1)  VALUE('0B'X);
+          DCL RED          CHAR(1)  VALUE('0C'X);
+          DCL MAGENTA      CHAR(1)  VALUE('0D'X);
+          DCL YELLOW       CHAR(1)  VALUE('0E'X);
+          DCL WHITE        CHAR(1)  VALUE('0F'X);
+
+          DCL UP           CHAR(1)  VALUE('75'X);
+          DCL DOWN         CHAR(1)  VALUE('63'X);
+          DCL LEFT         CHAR(1)  VALUE('73'X);
+          DCL RIGHT        CHAR(1)  VALUE('6F'X);
+
+          DCL HEAD         CHAR(1)  STATIC INIT('@');
+          DCL SPLAT        CHAR(1)  VALUE('0F'X);
+          DCL BORDER       CHAR(1)  VALUE('DB'X);
+          DCL REJECT       CHAR(1)  VALUE('78'X);
+
+          DCL RR           FIXED BIN(15) VALUE(1);   /* RIGHT-RIGHT */
+          DCL LL           FIXED BIN(15) VALUE(2);   /*  LEFT-LEFT  */
+          DCL RU           FIXED BIN(15) VALUE(3);   /* RIGHT-UP    */
+          DCL LU           FIXED BIN(15) VALUE(4);   /*  LEFT-UP    */
+          DCL RD           FIXED BIN(15) VALUE(5);   /* RIGHT-DOWN  */
+          DCL LD           FIXED BIN(15) VALUE(6);   /*  LEFT-DOWN  */
+          DCL UU           FIXED BIN(15) VALUE(7);   /*    UP-UP    */
+          DCL DD           FIXED BIN(15) VALUE(8);   /*  DOWN-DOWN  */
+          DCL UR           FIXED BIN(15) VALUE(9);   /*    UP-RIGHT */
+          DCL DR           FIXED BIN(15) VALUE(10);  /*  DOWN-RIGHT */
+          DCL UL           FIXED BIN(15) VALUE(11);  /*    UP-LEFT  */
+          DCL DL           FIXED BIN(15) VALUE(12);  /*  DOWN-LEFT  */
+
+          DCL HEADSET(7)   CHARACTER(1) STATIC INIT(
+                           '@',
+                           '@',
+                           '@',
+                           '01'X,
+                           '02'X,
+                           '02'X,
+                           '02'X);
+          DCL WORMBODY(7)  CHARACTER(12) STATIC INIT(
+                           '6F6F6F6F6F6F6F6F6F6F6F6F'X,
+                           'CFCFCFCFCFCFCFCFCFCFCFCF'X,
+                           '--/\\/¦¦/\\/',
+                           'C4C4D9C0BFDAB3B3DAC0BFD9'X,
+                           'CDCDBCC8BBC9BABAC9C8BBBC'X,
+                           '1A1B1818191918191A1A1B1B'X,
+                           '10111E1E1F1F1E1F10101111'X);
+                        /*  RRLLRULURDLDUUDDURDRULDL  */
+
+          DCL BODYSET      FIXED BIN(15) STATIC INIT(1);
+          DCL BODYPART     FIXED BIN(15) STATIC INIT(1);
+
+          DCL RGD          UNSIGNED FIXED BIN(8) VALUE('80'XN);
+          DCL LGD          UNSIGNED FIXED BIN(8) VALUE('40'XN);
+          DCL ROK          UNSIGNED FIXED BIN(8) VALUE('08'XN);
+          DCL LOK          UNSIGNED FIXED BIN(8) VALUE('04'XN);
+          DCL UOK          UNSIGNED FIXED BIN(8) VALUE('02'XN);
+          DCL DOK          UNSIGNED FIXED BIN(8) VALUE('01'XN);
+          DCL WAYS4        UNSIGNED FIXED BIN(8) VALUE('0F'XN);
+          DCL DECNTABL(32) UNSIGNED FIXED BIN(8)  STATIC INIT
+              (ROK,LOK,DOK,UOK, /* WHAT I THINK ARE THE BEST 8 OUT    */
+               LOK,ROK,DOK,UOK, /* OF ALL 24 POSSIBLE COMBINATIONS.   */
+               ROK,LOK,UOK,DOK, /*                                    */
+               LOK,ROK,UOK,DOK, /* COULD ADD MORE ENTRIES WITHOUT     */
+               DOK,UOK,ROK,LOK, /* CHANGING THE CODE FOR A SMALL      */
+               UOK,DOK,ROK,LOK, /* GAIN IN INTELLIGENCE (AND PROBABLY */
+               DOK,UOK,LOK,ROK, /* A LARGE GAIN IN CPU TIME USAGE).   */
+               UOK,DOK,LOK,ROK);
+          DCL DECENTRY     FIXED BIN(31);
+          DCL I            FIXED BIN(31);
+          DCL DELAY        FIXED BIN(31);
+          DCL LINES        FIXED BIN(16) UNSIGNED STATIC INIT(24);
+          DCL COLUMNS      FIXED BIN(16) UNSIGNED STATIC INIT(80);
+          DCL MOVLINES     FIXED BIN(31);
+          DCL MOVECOLS     FIXED BIN(31);
+          DCL ELIGIBLS     FIXED BIN(31);
+          DCL LASTLOOK     FIXED BIN(31);
+          DCL HEADADDR     FIXED BIN(31);
+          DCL TAILADDR     FIXED BIN(31);
+          DCL MOVECNTR     FIXED BIN(31);
+          DCL TESTGROW     FIXED BIN(31);
+          DCL FOODCOL      FIXED BIN(16) UNSIGNED;
+          DCL FOODROW      FIXED BIN(16) UNSIGNED;
+          DCL HEADCOL      FIXED BIN(16) UNSIGNED;
+          DCL HEADROW      FIXED BIN(16) UNSIGNED;
+          DCL TAILCOL      FIXED BIN(16) UNSIGNED;
+          DCL TAILROW      FIXED BIN(16) UNSIGNED;
+          DCL TEMPCOL      FIXED BIN(16) UNSIGNED;
+          DCL TEMPROW      FIXED BIN(16) UNSIGNED;
+          DCL FUTRCOL      FIXED BIN(16) UNSIGNED;
+          DCL FUTRROW      FIXED BIN(16) UNSIGNED;
+          DCL GROWSIZE     FIXED BIN(31) STATIC INIT(0);
+          DCL FOODVALU     FIXED BIN(31) STATIC INIT(0);
+          DCL FOODCNTR     FIXED BIN(31) STATIC INIT(0);
+          DCL STACKER      FIXED BIN(31) STATIC INIT(0);
+          DCL MEALCNTR     FIXED BIN(31) STATIC INIT(0);
+          DCL EATMOVES     FIXED BIN(31) STATIC INIT(0);
+          DCL THISTREK     FIXED BIN(31) STATIC INIT(0);
+          DCL COLOURS(7)   FIXED BIN(15) STATIC INIT((7)0);
+          DCL SCORE        FIXED BIN(15) STATIC INIT(0);
+          DCL SCOREO       FIXED BIN(15);
+          DCL HEADLOC      FIXED BIN(15);
+          DCL TAILLOC      FIXED BIN(15);
+          DCL HEADTST      FIXED BIN(15);
+          DCL TAILTST      FIXED BIN(15);
+          DCL NUMBRLOC     FIXED BIN(15);
+          DCL MOVDEPTH     FIXED BIN(15);
+          DCL HOLDEPTH     FIXED BIN(15);
+          DCL TGTDEPTH     FIXED BIN(15);
+          DCL DECDEPTH     FIXED BIN(15);
+          DCL PRVDEPTH     FIXED BIN(15);
+          DCL POSENTRY     FIXED BIN(15);
+          DCL DIRCOUNT     FIXED BIN(15);
+          DCL AUTOOPTS     FIXED BIN(15);
+          DCL AUTOMOVE     CHAR(1);
+          DCL DECISION     UNSIGNED FIXED BIN(8);
+          DCL UPORDN       CHAR(1)  STATIC INIT(UP);     /* ARBITRARY */
+          DCL RTORLFT      CHAR(1)  STATIC INIT(RIGHT);  /* REQUIRED  */
+          DCL HOLDCHAR     CHAR(1);
+          DCL HOLDPIC      PICTURE'9' DEFINED HOLDCHAR;
+          DCL NEXT         BIT(1)   STATIC INIT('0'B);
+          DCL CHEAT        BIT(1)   STATIC INIT('0'B);
+          DCL AUTO         BIT(1)   STATIC INIT('0'B);
+          DCL DBUG         BIT(1)   STATIC INIT('0'B);
+          DCL BLITZ        BIT(1)   STATIC INIT('0'B);
+          DCL FRTN         BIT(1)   STATIC INIT('0'B);
+          DCL CNCL         BIT(1)   STATIC INIT('0'B);
+          DCL XHST         BIT(1)   STATIC INIT('0'B);
+          DCL SSSS         BIT(1)   STATIC INIT('0'B);
+          DCL CRASHED      BIT(1)   STATIC INIT('0'B);
+          DCL TEST         BIT(1)   STATIC INIT('0'B);
+          DCL ATTN         BIT(1)   STATIC INIT('0'B);
+          DCL RVRS         BIT(1)   STATIC INIT('0'B);
+          DCL DINED        BIT(1)   STATIC INIT('0'B);
+          DCL FOLLOWME     BIT(1)   STATIC INIT('0'B);
+          DCL FOLOTEST     BIT(1)   STATIC INIT('0'B);
+          DCL FOODBIN      UNSIGNED FIXED BIN(8); /* LATEST FOOD SIZE */
+          DCL FOODNUMB     UNSIGNED FIXED BIN(8);
+          DCL FOODCHAR     CHAR(1)  BASED(ADDR(FOODNUMB));
+          DCL DIRFLAGS     UNSIGNED FIXED BIN(8);
+          DCL AUTODIRS     UNSIGNED FIXED BIN(8);
+          DCL THISOPTN     UNSIGNED FIXED BIN(8);
+          DCL THISCOLR     CHAR(1)  STATIC INIT('00'X);
+          DCL FOODMOVE     FIXED BIN(15);
+
+          DCL 1 POSPATHS(3),
+                2 POSDEPTH          FIXED BIN(15),
+                2 POSAMOVE          CHARACTER(1),
+                2 POSASTAT          FIXED BIN(8) UNSIGNED;
+
+          DCL CHARBUFR              CHARACTER(1920) CONTROLLED;
+
+         %DCL AHEADLIM              CHARACTER;
+         %AHEADLIM = '1000';
+
+          DCL 1 TESTARAY(AHEADLIM),
+                2 DIRNMBR  FIXED BIN(8) UNSIGNED,
+                2 DIRFLGS  FIXED BIN(8) UNSIGNED,
+                2 TAILCHR  CHARACTER(1),
+                2 HEADCHR  CHARACTER(1),
+                2 TAILPOS  FIXED BIN(15),
+                2 HEADPOS  FIXED BIN(15),
+                2 GROWNUM  FIXED BIN(15);
+          %PAGE;
+
+          ON ATTENTION BEGIN;
+               PUT SKIP DATA(MOVDEPTH, DECISION, DIRCTION,
+                   DIRCOUNT, DIRFLAGS, TGTDEPTH, MAXDEPTH,
+                   AUTOOPTS, AUTOMOVE, DECENTRY);
+               END;
+
+          ON SUBSCRIPTRANGE BEGIN;
+               PUT SKIP DATA(MOVDEPTH, DECISION, DIRCTION,
+                   DIRCOUNT, DIRFLAGS, TGTDEPTH, MAXDEPTH,
+                   AUTOOPTS, AUTOMOVE, DECENTRY);
+               END;
+
+          %PAGE;
+
+          CALL INIT1OFF;
+
+                                    /* WRITE THE INITIAL SCREEN IMAGE */
+          API16RC = VIO16WRTCHARSTRATT(CHARBUFR,1920,0,0,DKGREEN,0);
+          VIOCELL = SUBSTR(WORMBODY(BODYSET),BODYPART,1) ¦¦ FOODCOLR;
+          API16RC = VIO16WRTNCELL(VIOCELL,7,TAILROW,TAILCOL,0);
+          VIOCELL = HEAD ¦¦ FOODCOLR;
+          API16RC = VIO16WRTCELLSTR(VIOCELL,2,HEADROW,HEADCOL,0);
+          VIOCELL = ' ' ¦¦ HDGCOLOR;          /* YELLOW ON DARK GREEN */
+          API16RC = VIO16WRTNCELL(VIOCELL,COLUMNS,0,0,0);
+          API16RC = VIO16WRTNCELL(VIOCELL,COLUMNS,LINES-1,0,0);
+
+          VIOLINE = STARTHDR;
+          IF TEST
+          THEN SUBSTR(VIOLINE,1,13) = 'FOOD-COVERAGE';
+
+          API16RC = VIO16WRTCHARSTR(VIOLINE,50,0,1,0);
+          VIOLINE = ACRNMMSG;
+          API16RC = VIO16WRTCHARSTR(VIOLINE,40,LINES-1,1,0);
+
+ NEWTARGT:TIMECHAR = TIME();   /* GET "RANDOM NUMBER" FOR TARGET DTLS */
+          IF NEXT              /* IS NEXT TARGET NEEDED AFTER A MEAL? */
+          THEN DO;               /* YES, NOT IN FOOD GEN TEST MODE    */
+               NEXT = '0'B;      /* RESET NEXT-TARGET-NEEDED FLAG     */
+               STACKER = 0;      /* RESET STACKED MOVE COUNTER        */
+               MEALCNTR = MEALCNTR + 1;   /* ADJUST WORM MEAL COUNTER */
+               EATMOVES = EATMOVES + THISTREK; /* ALL MOVES FOR MEALS */
+               THISTREK = 0;             /* RESET MOVES FOR NEXT MEAL */
+               END;
+          WORMCOLR = FOODCOLR;       /* TAKE ON COLOUR OF LATEST FOOD */
+          IF THISCOLR > '00'X        /* USER SPECIFIED COLOUR?        */
+          THEN FOODCOLR = THISCOLR;  /* YES, USE IT - TEST MODE ONLY  */
+          ELSE DO;                   /* NO, MAKE RANDOM SELECTION     */
+               COLORBIN = '0F'XN - REM(SECONDS,7);
+               IF COLRCHAR = WORMCOLR       /* DID THE COLOUR CHANGE? */
+               THEN DO;                     /* NO, FORCE A CHANGE     */
+                    IF COLRCHAR = WHITE     /* TOP COLOUR?            */
+                    THEN COLRCHAR = RED;    /* YES, USE BOTTOM COLOUR */
+                    ELSE COLORBIN = COLORBIN + 1;      /* NO, ADD ONE */
+                    END;
+               END;                 /* KEEP TRACK OF COLOUR SELECTION */
+          COLOURS(COLORBIN-8) = COLOURS(COLORBIN-8) + 1;     /* COUNT */
+          FOODCOLR = COLRCHAR;                 /* REMEMBER FOOD COLOR */
+          I = REM(SECONDS,ELIGIBLS) + COLUMNS + 1; /* GET RANDOM SPOT */
+          SSSS = '0'B;          /* RESET START-SCREEN-SPACE-SCAN FLAG */
+
+ GETEMPTY:DO UNTIL (I > LASTLOOK);          /* SEARCH FOR VACANT BYTE */
+               IF SUBSTR(CHARBUFR,I,1) = ' '
+               THEN GO TO GOTEMPTY;                      /* FOUND ONE */
+               I = I + 1;
+               END;
+          IF SSSS                            /* SCANNED WHOLE SCREEN? */
+          THEN DO;              /* YES, AVOID INFINITE LOOP BY ENDING */
+               IF TEST                             /* NOWHERE FOR NUM */
+               THEN SCORVALU = FOODCNTR;     /* SHOW FOOD GENERATIONS */
+               ELSE SCORVALU = SCORE;        /* SHOW TOTAL FOOD VALUE */
+               VIOLINE = AMAZEMSG;             /* SHOW AMAZED MESSAGE */
+               API16RC = VIO16WRTCHARSTR(VIOLINE,56,0,23,0);
+               CALL DOSSLEEP(5000);                 /* WAIT 5 SECONDS */
+               GO TO ENDWORM;               /* FORCED TO END THE GAME */
+               END;
+          SSSS = '1'B;            /* SET START-SCREEN-SPACE-SCAN FLAG */
+          I = COLUMNS + 1;        /* POINT TO START OF "SCREEN SPACE" */
+          GO TO GETEMPTY;                      /* RESTART SCREEN SCAN */
+
+ GOTEMPTY:FOODBIN = 9 - REM(SECONDS,9);        /* GET A DECIMAL DIGIT */
+          FOODVALU = FOODVALU + FOODBIN;     /* ACCUMULATE FOOD VALUE */
+          FOODCNTR = FOODCNTR + 1;        /* INCREMENT FOOD GEN COUNT */
+          FOODNUMB = FOODBIN + '30'XN;  /* CONVERT DIGIT TO CHARACTER */
+          SUBSTR(CHARBUFR,I,1) = FOODCHAR;           /* LOAD NEW FOOD */
+          NUMBRLOC = I;                     /* REMEMBER FOOD LOCATION */
+          FOODROW = (NUMBRLOC-1) / COLUMNS;  /* DETERMINE ITS CO-ORDS */
+          FOODCOL = REM(NUMBRLOC-1,COLUMNS);
+          COLORBIN = ISLL(COLORBIN,4);          /* MAKE REVERSE VIDEO */
+          VIOCELL = FOODCHAR ¦¦ COLRCHAR;    /* CREATE CHAR+ATTR PAIR */
+                                              /* DISPLAY THE NEW FOOD */
+          API16RC = VIO16WRTCELLSTR(VIOCELL,2,FOODROW,FOODCOL,0);
+
+          IF TEST
+          THEN SCORVALU = FOODCNTR;     /* SHOW FOOD GENERATION COUNT */
+          ELSE SCORVALU = SCORE;       /* SHOW TOTAL FOOD VALUE EATEN */
+          API16RC = VIO16WRTCHARSTR(VIOLINE,4,0,15,0);
+
+ MOVELOOP:                                      /* GET KEYBOARD INPUT */
+
+          IF AUTO                 /* SET KEYBOARD POLL COUNT PER MOVE */
+          THEN I = 1;
+          ELSE I = 20;
+
+          DO WHILE (I > 0);
+
+               IF AUTO & BLITZ
+               THEN;
+               ELSE CALL DOSSLEEP(DELAY);               /* WAIT A BIT */
+
+                                                 /* POLL THE KEYBOARD */
+               API16RC = KBD16CHARIN(KBDDATA,KBDWAIT,0);
+                               /* DISPLAY MESSAGE IF BAD KEYBOARD I/O */
+               IF API16RC > 0 THEN PUT SKIP DATA(API16RC);
+
+               I = I - 1;                   /* DECREMENT LOOP COUNTER */
+
+               IF FBSTATUS < 32                        /* ANY INPUT ? */
+               THEN CHSCAN = 0;            /* NO, CLEAR RESIDUAL DATA */
+               ELSE DO;                    /* YES                     */
+                                           /* FLUSH DATA TYPED AHEAD  */
+                    API16RC = KBD16FLUSHBUFFER(0);
+                    I = 0;                 /* TERMINATE POLLING LOOP  */
+                    END;
+
+               END;                      /* END OF KEYBOARD POOL LOOP */
+
+          IF DIRCTION ^= '00'X              /* IF WORM IS MOVING THEN */
+          THEN PREVMOVE = DIRCTION;         /* REMEMBER PREVIOUS MOVE */
+
+          SELECT (CHSCAN);                        /* ACT ON INPUT KEY */
+            WHEN (0);                /* NO INPUT */
+            WHEN (59)                /* F1 */
+                 DO;
+                 CHEAT = '1'B;
+                 IF AUTO
+                 THEN BLITZ = ^BLITZ;
+                 ELSE AUTO = '1'B;
+                 IF BLITZ
+                 THEN SUBSTR(VIOLINE,1,4) = 'SLOW';
+                 ELSE SUBSTR(VIOLINE,1,4) = 'FAST';
+                 KBDWAIT = IO_NOWAIT;
+                 API16RC = VIO16WRTCHARSTR(VIOLINE,4,0,25,0);
+                 END;
+            WHEN (61)                /* F3 */
+                 GO TO ENDWORM;
+            WHEN (64)                /* F6 */
+                 IF MAXDEPTH > 0
+                 THEN MAXDEPTH = 0;
+                 ELSE MAXDEPTH = 24;
+            WHEN (66)                /* F8 */
+                 FOLOTEST = ^FOLOTEST;
+            WHEN (67)                /* F9 */
+                 XHST = ^XHST;
+            WHEN (134)               /* F12 */
+                 GO TO ENDWORM;
+            WHEN (72)                /* UP ARROW */
+                 DO;
+                 DIRCTION = UP;
+                 CALL AUTOOFF;
+                 END;
+            WHEN (75)                /* LEFT ARROW */
+                 DO;
+                 DIRCTION = LEFT;
+                 CALL AUTOOFF;
+                 END;
+            WHEN (77)                /* RIGHT ARROW */
+                 DO;
+                 DIRCTION = RIGHT;
+                 CALL AUTOOFF;
+                 END;
+            WHEN (80)                /* DOWN ARROW */
+                 DO;
+                 DIRCTION = DOWN;
+                 CALL AUTOOFF;
+                 END;
+            OTHERWISE CALL NEWBODY;  /* POSSIBLY A NUMBER */
+            END;
+
+          IF TEST
+          THEN GO TO NEWTARGT;       /* CONTINUE WITH FOOD GENERATION */
+
+          IF KBDWAIT = IO_WAIT                         /* MOVING YET? */
+          THEN GO TO MOVELOOP;             /* NO, WAIT FOR NEXT INPUT */
+
+          CALL AUTOPLOT;                          /* DECIDE NEXT MOVE */
+
+          CALL MOVE;                                /* MAKE NEXT MOVE */
+
+          IF NEXT
+          THEN GO TO NEWTARGT;           /* JUST ATE SO MAKE NEW FOOD */
+
+          IF ^CRASHED
+          THEN GO TO MOVELOOP;
+
+          CALL DOSBEEP(37,200);                      /* SOUND A SPLAT */
+
+          API16RC = KBD16CHARIN(KBDDATA,IO_WAIT,0);  /* WAIT FOR INPUT*/
+          IF API16RC > 0
+          THEN PUT SKIP DATA(API16RC);
+
+ ENDWORM:
+
+          CALL FAREWELL;                        /* DISPLAY STATISTICS */
+
+
+          FREE CHARBUFR;                        /* FREE SCREEN BUFFER */
+
+
+          /****** END OF PROGRAM ******/
+          %PAGE;
+ INIT1OFF:                         /* PERFORM ONCE-OFF INITIALIZATION */
+          PROCEDURE;
+
+                              /* PROCESS INVOCATION PARAMETER/OPERAND */
+          IF SUBSTR(INPARM,1,1) = 'T'
+          THEN MODE = 'TEST';
+          IF (LENGTH(INPARM) > 4) & (SUBSTR(INPARM,5,1) = 'T')
+          THEN MODE = 'TEST';
+          ELSE PUT SKIP LIST (LENGTH(INPARM),INPARM);
+          IF SUBSTR(INPARM,1,1) = 'H'
+          THEN SIZE = 'HALF';
+          IF SUBSTR(INPARM,1,1) = 'Q'
+          THEN SIZE = 'QUAR';
+
+          IF MODE = 'TEST'
+          THEN TEST = '1'B;         /* SET FOOD GENERATION TEST MODE  */
+          IF SIZE = 'HALF'
+          THEN COLUMNS = COLUMNS/2; /* USE ONLY TOP HALF OF SCREEN    */
+          IF SIZE = 'QUAR'
+          THEN LINES = LINES / 4;   /* USE ONLY TOP QUARTER OF SCREEN */
+          MOVLINES = LINES - 2;     /* GET WORM-ACCESSIBLE LINE COUNT */
+          MOVECOLS = COLUMNS - 2;   /*               AND COLUMN COUNT */
+
+          DELAY = 10;
+          VIOLINE = ' ';
+          KBDWAIT = IO_WAIT;
+
+          ALLOCATE CHARBUFR;        /* CREATE THE SCREEN BUFFER       */
+
+          SUBSTR(CHARBUFR,1,COLUMNS) = COPY(BORDER,COLUMNS);   /* TOP */
+
+          ELIGIBLS = COLUMNS * MOVLINES;     /* VERT BORDERS WEIGHTED */
+          DO I = 1 TO MOVLINES;
+               SUBSTR(CHARBUFR,(I*COLUMNS)+1,COLUMNS) =
+                                    COPY(' ',COLUMNS);
+               SUBSTR(CHARBUFR,(I*COLUMNS)+1,1) = BORDER;    /* LEFT  */
+               SUBSTR(CHARBUFR,(I+1)*COLUMNS,1) = BORDER;    /* RIGHT */
+               END;
+
+          LASTLOOK = (LINES - 1) * COLUMNS;  /* END OF WORM TERRITORY */
+          SUBSTR(CHARBUFR,LASTLOOK+1,COLUMNS) = COPY(BORDER,COLUMNS);
+
+          IF TEST
+          THEN RETURN;                        /* NO WORM IN TEST MODE */
+
+          TAILLOC = (LINES / 2 - 3) * COLUMNS + 11;  /* TAIL AT 10,11 */
+          HEADLOC = TAILLOC + 7;                     /* HEAD AT 10,18 */
+          TAILROW = LINES / 2 - 3;
+          TAILCOL = 10;
+          HEADROW = TAILROW;
+          HEADCOL = 17;
+          SUBSTR(CHARBUFR,TAILLOC,7) = COPY(RIGHT,7);
+          SUBSTR(CHARBUFR,HEADLOC,1) = HEAD;
+
+          RETURN;                                   /* TAIL NOW MOVED */
+
+          END INIT1OFF;
+          %PAGE;
+ MOVE:                                              /* PERFORM A MOVE */
+          PROCEDURE;
+
+          THISTREK = THISTREK + 1;
+
+          CALL MOVETAIL;                             /* MOVE THE TAIL */
+
+          CALL MOVEHEAD;                             /* MOVE THE HEAD */
+
+          RETURN;                                 /* RETURN TO CALLER */
+          %PAGE;
+ MOVETAIL:                                           /* MOVE THE TAIL */
+          PROCEDURE;
+
+          DO WHILE (GROWSIZE > 0);           /* CHECK FOR RECENT MEAL */
+               GROWSIZE = GROWSIZE - 1;  /* DECREMENT GROW MOVE COUNT */
+               RETURN;                            /* DO NOT MOVE TAIL */
+               END;
+
+          HOLDCHAR = SUBSTR(CHARBUFR,TAILLOC,1);     /* SAVE OLD TAIL */
+          SUBSTR(CHARBUFR,TAILLOC,1) = ' ';         /* BLANK OLD TAIL */
+
+          VIOCELL = ' ' ¦¦  DFLTATTR;        /* CREATE CHAR+ATTR PAIR */
+                                                /* ERASE THE OLD TAIL */
+          API16RC = VIO16WRTCELLSTR(VIOCELL,2,TAILROW,TAILCOL,0);
+
+          SELECT (HOLDCHAR);                 /* GET NEW TAIL LOCATION */
+            WHEN (RIGHT)
+                 DO;
+                 TAILLOC = TAILLOC + 1;
+                 TAILCOL = TAILCOL + 1;
+                 END;
+            WHEN (LEFT)
+                 DO;
+                 TAILLOC = TAILLOC - 1;
+                 TAILCOL = TAILCOL - 1;
+                 END;
+            WHEN (DOWN)
+                 DO;
+                 TAILLOC = TAILLOC + COLUMNS;
+                 TAILROW = TAILROW + 1;
+                 END;
+            WHEN (UP)
+                 DO;
+                 TAILLOC = TAILLOC - COLUMNS;
+                 TAILROW = TAILROW - 1;
+                 END;
+            OTHERWISE
+                 CALL SHOWFAIL('1',HOLDCHAR);
+            END;
+
+          RETURN;                                   /* TAIL NOW MOVED */
+
+          END MOVETAIL;
+          %PAGE;
+ MOVEHEAD:                                           /* MOVE THE HEAD */
+          PROCEDURE;
+
+          SUBSTR(CHARBUFR,HEADLOC,1) = DIRCTION;  /* OVERLAY OLD HEAD */
+
+                                             /* GET NEW HEAD LOCATION */
+          CALL BODYCHAR(DIRCTION,PREVMOVE,HEADLOC);
+
+          IF HEADLOC <= COLUMNS    /* CHECK FOR CRASH WITH TOP BORDER */
+          THEN CRASHED = '1'B;
+          IF HEADLOC > LASTLOOK /* CHECK FOR CRASH WITH BOTTOM BORDER */
+          THEN CRASHED = '1'B;
+          IF ^CRASHED  &  SUBSTR(CHARBUFR,HEADLOC,1) ^= ' '
+          THEN DO;
+               IF INDEX('123456789',SUBSTR(CHARBUFR,HEADLOC,1)) = 0
+               THEN CRASHED = '1'B;       /* HIT SOMETHING (NOT FOOD) */
+               ELSE DO;                   /* RAN INTO FOOD SO EAT IT  */
+                    SCORE = SCORE + FOODBIN;         /* ADJUST SCORE  */
+                    GROWSIZE = GROWSIZE + FOODBIN;    /* WORM GROWTH  */
+                    NEXT = '1'B;          /* NEED NEW FOOD GENERATED  */
+                    CALL DOSBEEP(200,20);            /* SOUND A BEEP  */
+                    END;
+               END;
+
+                                              /* OVERLAY THE OLD HEAD */
+          VIOCELL = SUBSTR(WORMBODY(BODYSET),BODYPART,1) ¦¦ WORMCOLR;
+          API16RC = VIO16WRTCELLSTR(VIOCELL,2,HEADROW,HEADCOL,0);
+
+          IF CRASHED
+          THEN DO;
+               HEAD = SPLAT;
+               SUBSTR(VIOLINE,1,16) = ' ';   /* ERASE AUTO COUNTERS   */
+               API16RC = VIO16WRTCHARSTR(VIOLINE,16,LINES-1,44,0);
+               END;
+
+          SUBSTR(CHARBUFR,HEADLOC,1) = '@';
+
+          HEADROW = (HEADLOC-1) / COLUMNS;   /* DETERMINE ITS CO-ORDS */
+          HEADCOL = REM(HEADLOC-1,COLUMNS);
+          VIOCELL = HEAD ¦¦ WORMCOLR;
+
+                                                /* WRITE THE NEW HEAD */
+          API16RC = VIO16WRTCELLSTR(VIOCELL,2,HEADROW,HEADCOL,0);
+
+          RETURN;                                   /* HEAD NOW MOVED */
+
+          END MOVEHEAD;
+
+
+          END MOVE;
+          %PAGE;
+ AUTOOFF: PROCEDURE;
+
+          KBDWAIT = IO_NOWAIT;             /* WORM MUST NOW BE MOVING */
+
+          IF ^AUTO THEN RETURN;              /* WORMOMATIC NOT ACTIVE */
+
+          AUTO = '0'B;                          /* NOW IN MANUAL MODE */
+          BLITZ = '0'B;                /* FIRST AUTO BUTTON IS "SLOW" */
+          SUBSTR(VIOLINE,1,4) = 'AUTO';       /* UPDATE MEANING OF F1 */
+          API16RC = VIO16WRTCHARSTR(VIOLINE,4,0,25,0);
+          VIOLINE = ' ';
+          API16RC = VIO16WRTCHARSTR(VIOLINE,16,LINES-1,44,0);
+
+          END AUTOOFF;
+          %PAGE;
+ BODYCHAR:   /* DETERMINE CHARACTER FOR BODY PART AND UPDATE LOCATION */
+
+          PROCEDURE (MOVECRNT,MOVEPREV,BODYLOC);
+
+          DCL MOVECRNT     CHARACTER(1);
+          DCL MOVEPREV     CHARACTER(1);
+          DCL BODYLOC      FIXED BIN(15);
+
+          SELECT (MOVECRNT);                 /* GET NEW HEAD LOCATION */
+            WHEN (RIGHT)
+                 DO;
+                 BODYLOC = BODYLOC + 1;
+                 RTORLFT = RIGHT;
+                 BODYPART = RR;
+                 IF MOVEPREV = DOWN
+                 THEN BODYPART = DR;
+                 IF MOVEPREV = UP
+                 THEN BODYPART = UR;
+                 END;
+            WHEN (LEFT)
+                 DO;
+                 BODYLOC = BODYLOC - 1;
+                 RTORLFT = LEFT;
+                 BODYPART = LL;
+                 IF MOVEPREV = DOWN
+                 THEN BODYPART = DL;
+                 IF MOVEPREV = UP
+                 THEN BODYPART = UL;
+                 END;
+            WHEN (DOWN)
+                 DO;
+                 BODYLOC = BODYLOC + COLUMNS;
+                 UPORDN  = DOWN;
+                 BODYPART = DD;
+                 IF MOVEPREV = RIGHT
+                 THEN BODYPART = RD;
+                 IF MOVEPREV = LEFT
+                 THEN BODYPART = LD;
+                 END;
+            WHEN (UP)
+                 DO;
+                 BODYLOC = BODYLOC - COLUMNS;
+                 UPORDN  = UP;
+                 BODYPART = UU;
+                 IF MOVEPREV = RIGHT
+                 THEN BODYPART = RU;
+                 IF MOVEPREV = LEFT
+                 THEN BODYPART = LU;
+                 END;
+            OTHERWISE
+                 CALL SHOWFAIL('2',MOVECRNT);
+            END;
+
+          END BODYCHAR;
+          %PAGE;
+ NEWBODY:                   /* UPDATE THE WORM'S BODY "CHARACTER SET" */
+          PROCEDURE;
+
+          DCL NEW_CRNT     CHARACTER(1);
+          DCL NEW_PREV     CHARACTER(1);
+          DCL NEW_LOC      FIXED BIN(15);
+          DCL NEW_COL      FIXED BIN(16) UNSIGNED;
+          DCL NEW_ROW      FIXED BIN(16) UNSIGNED;
+
+          IF CHSCAN < 2 THEN RETURN;           /* RETURN IF KEY < '1' */
+          IF CHSCAN > 8 THEN RETURN;           /* RETURN IF KEY > '7' */
+
+          IF CRASHED THEN RETURN;              /* CAN'T CHANGE IF DEAD*/
+
+          BODYSET = CHSCAN - 1;                /* SPECIFY BODY TO USE */
+          HEAD = HEADSET(CHSCAN-1);            /* SPECIFY HEAD TO USE */
+
+          NEW_LOC = TAILLOC;                   /* PROCESS TAIL TO HEAD*/
+          NEW_CRNT = SUBSTR(CHARBUFR,NEW_LOC,1);  /* FOR 1ST NEW_PREV */
+
+          DO UNTIL (NEW_LOC = HEADLOC);
+               NEW_PREV = NEW_CRNT;
+               NEW_CRNT = SUBSTR(CHARBUFR,NEW_LOC,1);
+                                             /* DETERMINE ITS CO-ORDS */
+               NEW_ROW = (NEW_LOC-1) / COLUMNS;
+               NEW_COL = REM(NEW_LOC-1,COLUMNS);
+                        /* GET CHARACTER TO DISPLAY AND NEXT LOCATION */
+               CALL BODYCHAR(NEW_CRNT,NEW_PREV,NEW_LOC);
+
+               VIOCHAR = SUBSTR(WORMBODY(BODYSET),BODYPART,1);
+
+               API16RC = VIO16WRTCHARSTR(VIOLINE,1,NEW_ROW,NEW_COL,0);
+
+               END;
+                                 /* FINISH WORM REMODEL WITH NEW HEAD */
+          VIOCHAR = HEAD;
+
+          API16RC = VIO16WRTCHARSTR(VIOLINE,1,HEADROW,HEADCOL,0);
+
+          RETURN;                                 /* RETURN TO CALLER */
+
+          END NEWBODY;
+          %PAGE;
+ AUTOPLOT:                           /* WORMOMATIC DECISION ALGORITHM */
+          PROCEDURE;
+
+          IF ^AUTO THEN RETURN;      /* JUST RETURN IN MANUAL MODE    */
+
+          MOVECNTR = 0;              /* NO MOVES TESTED YET           */
+          POSENTRY = 0;              /* NO POSSIBLE OUTCOME DATA YET  */
+          POSPATHS.POSDEPTH = 0;
+
+          CALL PATHEVAL(HEADLOC,GROWSIZE,TAILLOC);
+
+          AUTOOPTS = DIRCOUNT;       /* WORMOMATIC'S INITIAL OPTIONS  */
+          AUTODIRS = DIRFLAGS;
+
+ PONDORNT:HOLDEPTH = 0;              /* RESET FUTURE FOR THIS CHOICE  */
+          FOLLOWME = '0'B;
+
+          IF AUTOOPTS = 0            /* ARE WE TRAPPED?               */
+          THEN RETURN;               /* YES, FACE IT LIKE A WORM      */
+
+          IF AUTOOPTS = 1            /* GO THE ONLY VIABLE DIRECTION  */
+          THEN DO;
+               IF AUTODIRS = ROK + RGD
+               THEN GO TO GORIGHT;
+               IF AUTODIRS = LOK + LGD
+               THEN GO TO GOLEFT;
+               IF AUTODIRS = ROK
+               THEN GO TO GORIGHT;
+               IF AUTODIRS = LOK
+               THEN GO TO GOLEFT;
+               IF AUTODIRS = DOK
+               THEN GO TO GODOWN;
+               IF AUTODIRS = UOK
+               THEN GO TO GOUP;
+               COLORBIN = AUTODIRS;
+               CALL SHOWFAIL('3',COLRCHAR);
+               END;
+
+          IF HEADROW > FOODROW
+          THEN GO TO CLIMB;          /* HEAD IS BELOW THE NUMBER      */
+          IF HEADROW = FOODROW
+          THEN GO TO RIGHTALT;       /* HEAD IS ON NUMBER'S LINE      */
+                                     /* HEAD IS ABOVE THE NUMBER      */
+
+ DIVE:    IF IAND(AUTODIRS,DOK) = 0    /* DOWN POSSIBLE?              */
+          THEN GO TO DIVISH;           /* NO, CAN'T GO DOWN           */
+          IF DIRCTION = DOWN           /* YES, CURRENTLY GOING DOWN?  */
+          THEN GO TO GODOWN;           /* YES, KEEP GOING DOWN        */
+          IF IAND(AUTODIRS,RGD) = RGD  /* NO, LEFT OR RIGHT POSSIBLE? */
+           ¦ IAND(AUTODIRS,LGD) = LGD
+          THEN GO TO GODOWN;           /* YES, NOT A CRUCIAL DECISION */
+          IF IAND(AUTODIRS,UOK) = 0    /* NO, IS UP POSSIBLE?         */
+          THEN GO TO GODOWN;           /* NO, DOWN IS ONLY OPTION     */
+ MIDTREND:IF DIRCTION = LEFT           /* CURRENTLY GOING LEFT?       */
+          THEN GO TO LFT2VERT;         /* YES                         */
+          IF DIRCTION ^= RIGHT         /* CURRENTLY GOING RIGHT?      */
+          THEN GO TO MIDWAY;           /* NO                          */
+                                       /* RIGHT BLOCKED BY "UP" WORM? */
+          IF SUBSTR(CHARBUFR,HEADLOC+1,1) = UP
+          THEN GO TO GODOWN;           /* YES, GO DOWN                */
+                                       /* NO, BLOCKED BY "DOWN" WORM? */
+          IF SUBSTR(CHARBUFR,HEADLOC+1,1) = DOWN
+          THEN GO TO GOUP;             /* YES, GO UP                  */
+                                       /* NO, BLOCKED BY "RIGHT" WORM?*/
+          IF SUBSTR(CHARBUFR,HEADLOC+1,1) ^= RIGHT
+          THEN GO TO MIDWAY;           /* NO                          */
+                                       /* YES, "RIGHT" AFTER "UP"?    */
+          IF SUBSTR(CHARBUFR,HEADLOC+1+COLUMNS,1) = UP
+          THEN GO TO GODOWN;           /* YES, GO DOWN                */
+          ELSE GO TO GOUP;             /* NO, GO UP                   */
+ LFT2VERT:                             /* LEFT BLOCKED BY "UP" WORM?  */
+          IF SUBSTR(CHARBUFR,HEADLOC-1,1) = UP
+          THEN GO TO GODOWN;           /* YES, GO DOWN                */
+                                       /* NO, BLOCKED BY "DOWN" WORM? */
+          IF SUBSTR(CHARBUFR,HEADLOC-1,1) = DOWN
+          THEN GO TO GOUP;             /* YES, GO UP                  */
+                                       /* NO, BLOCKED BY "LEFT" WORM? */
+          IF SUBSTR(CHARBUFR,HEADLOC-1,1) ^= LEFT
+          THEN GO TO MIDWAY;           /* NO                          */
+                                       /* YES, "LEFT" AFTER "UP"?     */
+          IF SUBSTR(CHARBUFR,HEADLOC-1+COLUMNS,1) = UP
+          THEN GO TO GODOWN;           /* YES, GO DOWN                */
+          ELSE GO TO GOUP;             /* NO, GO UP                   */
+ MIDWAY:                               /* NEXT TO RIGHT BORDER?       */
+          IF SUBSTR(CHARBUFR,HEADLOC+1,1) = BORDER
+          THEN GO TO VERTLUST;         /* YES                         */
+                                       /* NEXT TO LEFT BORDER?        */
+          IF SUBSTR(CHARBUFR,HEADLOC-1,1) = BORDER
+          THEN GO TO VERTLUST;         /* YES                         */
+ CENTREIT:IF (LINES/2) > HEADROW       /* HEAD IN TOP HALF OF SCREEN? */
+          THEN GO TO GODOWN;           /* YES, GO DOWN FROM TOP HALF  */
+          ELSE GO TO GOUP;             /* NO, GO UP FROM LOWER HALF   */
+ VERTLUST:IF HEADROW > FOODROW         /* WHICH SIDE OF FOOD IS HEAD? */
+          THEN GO TO GOUP;             /* BELOW THE NUMBER            */
+          IF HEADROW < FOODROW
+          THEN GO TO GODOWN;           /* ABOVE THE NUMBER            */
+          GO TO CENTREIT;              /* BOTH ON THE SAME LINE       */
+ DIVISH:  IF IAND(AUTODIRS,RGD) = RGD  /* LEFT, RIGHT, UP POSSIBLE?   */
+           & IAND(AUTODIRS,LGD) = LGD
+           & IAND(AUTODIRS,UOK) = UOK
+          THEN GO TO GOFORIT;          /* YES, MUST BE IN THE OPEN    */
+ HORIZNTL:IF IAND(AUTODIRS,RGD) = 0    /* LEFT OR RIGHT POSSIBLE?     */
+           & IAND(AUTODIRS,LGD) = 0
+          THEN GO TO GOVERT;           /* NO, NEITHER                 */
+          IF IAND(AUTODIRS,RGD) = RGD  /* LEFT OR RIGHT POSSIBLE?     */
+           & IAND(AUTODIRS,LGD) = LGD
+          THEN;                        /* YES, BOTH                   */
+          ELSE GO TO GOHORIZ;          /* YES, TAKE THE ONE THAT IS   */
+          IF DIRCTION ^= DOWN          /* CURRENTLY GOING DOWN?       */
+          THEN GO TO UPOPP;            /* NO                          */
+          I = HEADLOC + COLUMNS;       /* YES, POINT TO DOWN POSITION */
+ HORIZOPP:IF SUBSTR(CHARBUFR,I,1) = RIGHT /* BLOCKED BY "RIGHT" WORM? */
+          THEN GO TO GOLEFT;              /* YES, SO GO LEFT          */
+          IF SUBSTR(CHARBUFR,I,1) = LEFT  /* BLOCKED BY "LEFT" WORM?  */
+          THEN GO TO GORIGHT;             /* YES, SO GO RIGHT         */
+          IF I < COLUMNS                  /* OBSTRUCTED BY BORDER?    */
+          THEN GO TO GORTORLF;            /* YES, NOT A WORM SEGMENT  */
+          IF I > LASTLOOK                 /* OBSTRUCTED BY BORDER?    */
+          THEN GO TO GORTORLF;            /* YES, NOT A WORM SEGMENT  */
+          IF SUBSTR(CHARBUFR,I+1,1) = LEFT/* BLOCKED BY "LEFT" TREND? */
+          THEN GO TO GORIGHT;          /* YES, SO GO RIGHT            */
+          ELSE GO TO GOLEFT;           /* NO, GO LEFT FOR "RIGHT"     */
+ UPOPP:   IF DIRCTION ^= UP            /* CURRENTLY GOING UP?         */
+          THEN GO TO GORTORLF;         /* NO                          */
+          I = HEADLOC - COLUMNS;       /* YES, POINT TO UP POSITION   */
+          GO TO HORIZOPP;
+ GOHORIZ: IF IAND(AUTODIRS,RGD) = RGD  /* 1 IS POSSIBLE, IS IT RIGHT? */
+          THEN GO TO GORIGHT;          /* YES, DO IT                  */
+          ELSE GO TO GOLEFT;           /* NO, IT MUST BE LEFT         */
+ GOVERT:  IF IAND(AUTODIRS,UOK) = UOK  /* 1 IS POSSIBLE, IS IT UP?    */
+          THEN GO TO GOUP;             /* YES, DO IT                  */
+          ELSE GO TO GODOWN;           /* NO, IT MUST BE DOWN         */
+
+ RIGHTALT:IF DIRCTION = UP             /* GOING UP?                   */
+          THEN GO TO RAUP;             /* YES                         */
+          IF DIRCTION = DOWN           /* GOING DOWN?                 */
+          THEN GO TO RADWN;            /* YES                         */
+          IF DIRCTION = LEFT           /* GOING LEFT?                 */
+          THEN GO TO RALFT;            /* YES                         */
+          IF IAND(AUTODIRS,RGD) = RGD  /* GOING RIGHT-IS IT STILL OK? */
+          THEN GO TO GOFORIT;          /* YES                         */
+          I = HEADLOC + 1;             /* POINT TO RIGHT POSITION     */
+ VERTIOPP:IF SUBSTR(CHARBUFR,I,1) = UP /* OBSTRUCTED BY "UP" WORM?    */
+          THEN GO TO GODOWN;           /* YES, SO GO DOWN             */
+                                       /* OBSTRUCTED BY "DOWN" WORM?  */
+          IF SUBSTR(CHARBUFR,I,1) = DOWN
+          THEN GO TO GOUP;             /* YES, SO GO UP               */
+          GO TO GOFORIT;               /* NOT UP OR DOWN WORM SEGMENT */
+
+ RALFT:   IF IAND(AUTODIRS,LGD) = LGD  /* GOING LEFT-IS IT STILL OK?  */
+          THEN GO TO GOFORIT;          /* YES                         */
+          I = HEADLOC - 1;             /* POINT TO LEFT POSITION      */
+          GO TO VERTIOPP;
+
+ RADWN:   IF IAND(AUTODIRS,DOK) = DOK  /* GOING DOWN-IS IT STILL OK?  */
+          THEN GO TO GOFORIT;          /* YES                         */
+          I = HEADLOC + COLUMNS;       /* POINT TO DOWN POSITION      */
+          GO TO HORIZOPP;
+
+ RAUP:    IF IAND(AUTODIRS,UOK) = UOK  /* GOING UP - IS UP STILL OK?  */
+          THEN GO TO GOFORIT;          /* YES                         */
+          I = HEADLOC - COLUMNS;       /* POINT TO UP POSITION        */
+          GO TO HORIZOPP;
+
+ GOFORIT: IF HEADCOL > FOODCOL         /* WHICH SIDE IS WORM'S HEAD?  */
+          THEN GO TO CRAWLEFT;         /* RIGHT OF THE NUMBER         */
+          IF IAND(AUTODIRS,RGD) = RGD  /* RIGHT POSSIBLE?             */
+          THEN GO TO GORIGHT;          /* YES, GO RIGHT               */
+ GOUPORDN:IF IAND(AUTODIRS,UOK) = UOK  /* ARE UP AND DOWN POSSIBLE?   */
+           & IAND(AUTODIRS,DOK) = DOK
+          THEN GO TO UPANDOWN;         /* YES, BOTH                   */
+          IF IAND(AUTODIRS,UOK) = UOK  /* IS JUST UP POSSIBLE?        */
+          THEN GO TO GOUP;             /* YES                         */
+          IF IAND(AUTODIRS,DOK) = DOK  /* IS JUST DOWN POSSIBLE?      */
+          THEN GO TO GODOWN;           /* YES                         */
+          GO TO GOHORIZ;               /* NEITHER, ONLY 1 IS POSSIBLE */
+ UPANDOWN:IF UPORDN = UP               /* WAS LAST VERTICAL UP?       */
+          THEN GO TO GOUP;             /* YES, GO UP                  */
+          ELSE GO TO GODOWN;           /* NO, IT WAS DOWN SO GO DOWN  */
+ CRAWLEFT:IF IAND(AUTODIRS,LGD) = LGD  /* LEFT POSSIBLE?              */
+          THEN GO TO GOLEFT;           /* YES, GO LEFT                */
+          GO TO GOUPORDN;              /* NO, MOVE VERTICALLY         */
+
+ GORTORLF:I = HEADLOC;                 /* GET HEAD'S LOCATION         */
+ ISRTBLKD:I = I + 1;                   /* POINT TO NEXT RIGHT POSITION*/
+          IF SUBSTR(CHARBUFR,I,1)= ' ' /* BLANK TO THE RIGHT?         */
+          THEN GO TO ISRTBLKD;         /* YES                         */
+                                       /* NO, FOOD TO THE RIGHT?      */
+          IF INDEX('123456789',SUBSTR(CHARBUFR,I,1)) > 0
+          THEN GO TO GORIGHT;          /* YES, GO RIGHT               */
+          I = HEADLOC;                 /* NO                          */
+ ISLFBLKD:I = I - 1;                   /* POINT TO LEFT POSITION      */
+          IF SUBSTR(CHARBUFR,I,1)= ' ' /* BLANK TO THE LEFT?          */
+          THEN GO TO ISLFBLKD;         /* YES                         */
+                                       /* NO, FOOD TO THE LEFT?       */
+          IF INDEX('123456789',SUBSTR(CHARBUFR,I,1)) > 0
+          THEN GO TO GOLEFT;           /* YES, GO LEFT                */
+          IF RTORLFT = RIGHT           /* WAS LAST HORIZONTAL RIGHT?  */
+          THEN GO TO GORIGHT;          /* YES, GO RIGHT               */
+          ELSE GO TO GOLEFT;           /* NO, IT WAS LEFT SO GO LEFT  */
+
+ CLIMB:   IF IAND(AUTODIRS,UOK) = 0    /* UP POSSIBLE?                */
+          THEN GO TO CLIMBISH;         /* NO, CAN'T GO UP             */
+          IF DIRCTION = UP             /* YES, CURRENTLY GOING UP?    */
+          THEN GO TO GOUP;             /* YES, KEEP GOING UP          */
+          IF IAND(AUTODIRS,RGD) = RGD  /* NO, LEFT OR RIGHT POSSIBLE? */
+           ¦ IAND(AUTODIRS,LGD) = LGD
+          THEN GO TO GOUP;             /* YES, NOT A CRUCIAL DECISION */
+          IF IAND(AUTODIRS,DOK) = 0    /* NO, IS DOWN POSSIBLE?       */
+          THEN GO TO GOUP;             /* NO, UP IS ONLY OPTION       */
+          GO TO MIDTREND;              /* NO, GO TO MIDDLE OF SCREEN  */
+ CLIMBISH:IF IAND(AUTODIRS,RGD) = RGD  /* LEFT, RIGHT, DOWN POSSIBLE? */
+           & IAND(AUTODIRS,LGD) = LGD
+           & IAND(AUTODIRS,UOK) = DOK
+          THEN GO TO GOFORIT;          /* YES, MUST BE IN THE OPEN    */
+          GO TO HORIZNTL;              /* NO, MAKE A HORIZONTAL MOVE  */
+
+ GODOWN:  THISOPTN = DOK;
+          AUTOMOVE = DOWN;
+          GO TO TESTTEST;
+ GOUP:    THISOPTN = UOK;
+          AUTOMOVE = UP;
+          GO TO TESTTEST;
+ GOLEFT:  THISOPTN = LOK;
+          AUTOMOVE = LEFT;
+          GO TO TESTTEST;
+ GORIGHT: THISOPTN = ROK;
+          AUTOMOVE = RIGHT;
+
+ TESTTEST:IF MAXDEPTH < 1              /* ANY LOOK-AHEAD?             */
+          THEN DO;                     /* NO                          */
+               DIRCTION = AUTOMOVE;    /* SUPPLY ALGORITHM'S DECISION */
+               RETURN;                 /* AND RETURN FROM WORMOMATIC  */
+               END;
+
+          DECENTRY = 1;        /* RESET DECISION TABLE POINTER        */
+
+ TESTMOVE:DECISION = THISOPTN; /* GET PRE-DETERMINED INITIAL DECISION */
+          TESTGROW = GROWSIZE; /* COPY GROWSIZE FOR FUTURE PROJECTIONS*/
+          FOODMOVE = 0;
+          DECDEPTH = 0;            /* NO FUTURE DECISIONS YET         */
+          MOVDEPTH = 0;            /* STILL IN THE PRESENT            */
+          TGTDEPTH = SCORE + 8;    /* NO POINT LOOKING BEYOND THIS    */
+          TAILTST = TAILLOC;       /* COPY TAIL LOCATION              */
+          HEADTST = HEADLOC;       /* COPY HEAD LOCATION              */
+
+ TESTTAIL:MOVECNTR = MOVECNTR + 1; /* INCREMENT TEST MOVE COUNTER     */
+          MOVDEPTH = MOVDEPTH + 1; /* INCREMENT DEPTH INTO FUTURE     */
+          IF MOVDEPTH > HOLDEPTH           /* LOCAL MAXIMUM DEPTH?    */
+          THEN HOLDEPTH = MOVDEPTH;        /* YES, SAVE IT            */
+          HOLDCHAR = SUBSTR(CHARBUFR,TAILTST,1);
+          TESTARAY(MOVDEPTH).TAILCHR = HOLDCHAR;
+          TESTARAY(MOVDEPTH).TAILPOS = TAILTST;  /* SAVE TAIL DETAILS */
+          IF TESTGROW > 0                        /* EATEN RECENTLY?   */
+          THEN DO;                               /* YES, GROW A BIT   */
+               TESTGROW = TESTGROW - 1;   /* DECREMENT GROWTH COUNTER */
+               GO TO TESTHEAD;
+               END;
+          SELECT (HOLDCHAR);                 /* GET NEW TAIL LOCATION */
+                 WHEN (RIGHT)
+                      I = 1;
+                 WHEN (LEFT)
+                      I = -1;
+                 WHEN (DOWN)
+                      I = COLUMNS;
+                 WHEN (UP)
+                      I = -COLUMNS;
+                 OTHERWISE
+                      CALL SHOWFAIL('4',HOLDCHAR);
+                 END;
+          SUBSTR(CHARBUFR,TAILTST,1) = ' ';
+          TAILTST = TAILTST + I;
+
+ TESTHEAD:TESTARAY(MOVDEPTH).HEADPOS = HEADTST;  /* SAVE HEAD DETAILS */
+          TESTARAY(MOVDEPTH).GROWNUM = TESTGROW; /* SAVE GROWTH       */
+          SELECT (DECISION);                 /* GET NEW HEAD LOCATION */
+                 WHEN (ROK)
+                      DO;
+                      SUBSTR(CHARBUFR,HEADTST,1) = RIGHT;
+                      HEADTST = HEADTST + 1;
+                      END;
+                 WHEN (LOK)
+                      DO;
+                      SUBSTR(CHARBUFR,HEADTST,1) = LEFT;
+                      HEADTST = HEADTST - 1;
+                      END;
+                 WHEN (DOK)
+                      DO;
+                      SUBSTR(CHARBUFR,HEADTST,1) = DOWN;
+                      HEADTST = HEADTST + COLUMNS;
+                      END;
+                 WHEN (UOK)
+                      DO;
+                      SUBSTR(CHARBUFR,HEADTST,1) = UP;
+                      HEADTST = HEADTST - COLUMNS;
+                      END;
+                 OTHERWISE
+                      CALL SHOWFAIL('5','?');
+                 END;
+          DINED = '0'B;                          /* RESET MEAL STATUS */
+          HOLDCHAR = SUBSTR(CHARBUFR,HEADTST,1);
+          IF HOLDCHAR = ' '                      /* EMPTY SPOT?       */
+          THEN GO TO TESTEVAL;                   /* YES               */
+          IF INDEX('123456789',HOLDCHAR) = 0     /* TARGET NUMBER?    */
+          THEN CALL SHOWFAIL('9',HOLDCHAR);      /* NO, TERMINATE     */
+          DINED = '1'B;      /* REMEMBER EATING FOOD AS A POSSIBILITY */
+          TESTGROW = TESTGROW + HOLDPIC + 11;   /* CATER FOR NEW FOOD */
+
+ TESTEVAL:SUBSTR(CHARBUFR,HEADTST,1) = '@';        /* SUPPLY NEW HEAD */
+
+          IF DBUG
+          THEN DO;                       /* DUMP LATEST SCREEN BUFFER */
+               SUBSTR(CHARBUFR,1,1) = 'T';             /* TEST SCREEN */
+               FUTRMOVE = MOVDEPTH;
+               SUBSTR(CHARBUFR,18,5) = FUTRMOVE;
+               API16RC = VIO16WRTCHARSTRATT(CHARBUFR,1920,0,0,CYAN,0);
+               IF ^BLITZ
+               THEN CALL DOSSLEEP(DELAY);
+               END;
+
+          CALL PATHEVAL(HEADTST,TESTGROW,TAILTST);
+
+          TESTARAY(MOVDEPTH).DIRFLGS = IAND(DIRFLAGS,WAYS4);
+          TESTARAY(MOVDEPTH).DIRNMBR = DIRCOUNT;   /* SAVE DIRECTIONS */
+          TESTARAY(MOVDEPTH).HEADCHR = HOLDCHAR;   /* PRE-HEAD OVRLAY */
+
+          IF DIRCOUNT > 0                     /* IS THE WORM TRAPPED? */
+          THEN GO TO MAXCHECK;                /* NO, PRESS ON         */
+          IF XHST             /* YES, IN EXHAUSTIVE TEST MODE?        */
+          THEN GO TO BACKOUT; /* YES, TAKE BACK THE PREVIOUS DECISION */
+          CALL UNDOTEST;      /* NO, RESTORE BUFFER IMAGE             */
+          DECENTRY = DECENTRY + 4;  /* POINT TO NEXT DECISION PATTERN */
+          IF DECDEPTH = 0           /* ANY DECISIONS?                 */
+          THEN GO TO YAEORNAY;      /* NO, TUNNEL FAST PATH EXIT      */
+          IF DECENTRY > 32          /* END OF DECISION PATTERNS?      */
+          THEN GO TO YAEORNAY;      /* YES, JUDGEMENT TIME            */
+          ELSE GO TO TESTMOVE;      /* NO, RETRY WITH NEW PATTERN     */
+ MAXCHECK:IF MOVDEPTH = AHEADLIM    /* REACHED LOOK-AHEAD CAPACITY?   */
+          THEN GO TO TAKEPATH;      /* YES, TERMINATE LOOK-AHEAD      */
+          IF MOVDEPTH > TGTDEPTH    /* LOOKED BEYOND LENGTH OF WORM?  */
+          THEN GO TO TAKEPATH;      /* YES, THAT IS FAR ENOUGH        */
+          IF TESTARAY(MOVDEPTH).DIRNMBR < 2 /* NO, MORE THAN ONE WAY? */
+          THEN GO TO CHOOSDIR;      /* NO, IGNORE MAXDEPTH FOR TUNNELS*/
+          IF AUTOOPTS > 1           /* MORE THAN 1 ORIGINAL WAY?      */
+           ¦ POSENTRY > 0
+          THEN GO TO CRUNCHON;      /* YES, CONTINUE CRUNCHING        */
+          COLRCHAR = BLUE;          /* CODE BLUE FOR QUICK THINKING   */
+          GO TO TRUEBLUE;           /* TAKE THE ONLY POSSIBLE PATH    */
+ CRUNCHON:DECDEPTH = DECDEPTH + 1;  /*SET CURRENT DECISION-POINT DEPTH*/
+          IF XHST                   /* CHOOSE DIRECTION IF EXHAUSTIVE */
+           & DECDEPTH >= MAXDEPTH   /*       MODE HAS REACHED THE     */
+          THEN GO TO TAKEPATH;      /*       MAXIMUM LOOK-AHEAD DEPTH */
+          IF ^FOLOTEST              /* CHECK FOR FOLLOWING OWN TAIL?  */
+          THEN GO TO CHOOSDIR;      /* NO                             */
+          IF FOLLOWME               /* FOLLOWING OWN TAIL?            */
+          THEN DO;                  /* YES, SHOULD LIVE ON            */
+               IF POSENTRY = 0      /* ALGORITHMS'S FIRST CHOICE?     */
+               THEN GO TO TAKEPATH; /* YES, TAKE IT                   */
+               HOLDEPTH = TGTDEPTH; /* POTENTIAL LIFE IS LIMITLESS    */
+               GO TO YAEORNAY;      /* TRY OTHER MOVES TO AVOID LOOP  */
+               END;
+ CHOOSDIR:DO I = 0 TO 3;            /* TRY FOUR POSSIBLE DIRECTIONS   */
+               DECISION = IAND(DIRFLAGS,DECNTABL(DECENTRY+I));
+               IF DECISION > 0      /* FOUND A POSSIBLE MOVE?         */
+               THEN GO TO TESTTAIL; /* YES, TAKE IT                   */
+               END;
+          CALL SHOWFAIL('6','0');   /* ERROR IF NO POSSIBILE MOVE     */
+
+ BACKOUT:                                        /* ERASE THIS HEAD   */
+          SUBSTR(CHARBUFR,HEADTST,1) = TESTARAY(MOVDEPTH).HEADCHR;
+          TESTGROW = TESTARAY(MOVDEPTH).GROWNUM; /* RESTORE GROWTH    */
+          HEADTST = TESTARAY(MOVDEPTH).HEADPOS;  /* USE PREVIOUS HEAD */
+          HOLDCHAR = SUBSTR(CHARBUFR,HEADTST,1); /* SAVE THE CHOICE   */
+          SUBSTR(CHARBUFR,HEADTST,1) = '@';      /* RESTORE HEAD      */
+          TAILTST = TESTARAY(MOVDEPTH).TAILPOS;  /* USE PREVIOUS TAIL */
+          SUBSTR(CHARBUFR,TAILTST,1) = TESTARAY(MOVDEPTH).TAILCHR;
+          IF DBUG
+          THEN DO;                       /* DUMP LATEST SCREEN BUFFER */
+               SUBSTR(CHARBUFR,1,1) = 'B';          /* BACKOUT SCREEN */
+               FUTRMOVE = MOVDEPTH;
+               SUBSTR(CHARBUFR,18,5) = FUTRMOVE;
+               API16RC = VIO16WRTCHARSTRATT(CHARBUFR,1920,0,0,BLUE,0);
+               IF ^BLITZ
+               THEN CALL DOSSLEEP(DELAY);
+               END;
+          SELECT (HOLDCHAR);        /* DETERMINE THE UNDONE DIRECTION */
+                 WHEN (RIGHT)
+                      DECISION = ROK;
+                 WHEN (LEFT)
+                      DECISION = LOK;
+                 WHEN (DOWN)
+                      DECISION = DOK;
+                 WHEN (UP)
+                      DECISION = UOK;
+                 OTHERWISE
+                      CALL SHOWFAIL('7',HOLDCHAR);
+                 END;
+          IF TESTARAY(MOVDEPTH).DIRNMBR > 1  /* DECISION POINT HERE?  */
+          THEN DECDEPTH = DECDEPTH = 1;      /* YES                   */
+          MOVDEPTH = MOVDEPTH - 1;           /* ADJUST FUTURE INDEX   */
+          IF MOVDEPTH = 0           /* DONE EVERY POSSIBLE BRANCH?    */
+          THEN GO TO YAEORNAY;      /* YES, JUDGEMENT TIME            */
+          TESTARAY(MOVDEPTH).DIRFLGS =       /* DELETE THIS DECISION  */
+          TESTARAY(MOVDEPTH).DIRFLGS - DECISION;
+          DIRFLAGS = TESTARAY(MOVDEPTH).DIRFLGS;
+                                    /* ANY POSSIBILITIES LEFT?        */
+          IF TESTARAY(MOVDEPTH).DIRFLGS = 0
+          THEN GO TO BACKOUT;       /* NO,  BACKOUT ANOTHER MOVE      */
+          ELSE GO TO CHOOSDIR;      /* YES, TAKE A DIFFERENT PATH     */
+
+
+ YAEORNAY:POSENTRY = POSENTRY + 1;  /* POINT TO NEXT FUTURE SUMMARY   */
+          POSPATHS(POSENTRY).POSDEPTH = HOLDEPTH;   /* POTENTIAL LIFE */
+          POSPATHS(POSENTRY).POSAMOVE = AUTOMOVE;   /* ORIGINAL MOVE  */
+          POSPATHS(POSENTRY).POSASTAT = TESTARAY(1).DIRFLGS;
+
+          IF XHST                   /* IN EXHAUSTIVE TEST MOVE MODE?  */
+          THEN DO;                  /* YES, SHOW LOOK-AHEAD'S VIEW    */
+               IF DINED             /* FORCE CHOICE OF SCORING DEATH  */
+               THEN POSPATHS(POSENTRY).POSDEPTH = 32767;
+               TEMPROW = HEADROW;
+               TEMPCOL = HEADCOL;
+               SELECT (AUTOMOVE);   /* DETERMINE THE UNDONE DIRECTION */
+                      WHEN (RIGHT)
+                           TEMPCOL = HEADCOL + 1;
+                      WHEN (LEFT)
+                           TEMPCOL = HEADCOL - 1;
+                      WHEN (DOWN)
+                           TEMPROW = HEADROW + 1;
+                      WHEN (UP)
+                           TEMPROW = HEADROW - 1;
+                      OTHERWISE
+                           CALL SHOWFAIL('8',AUTOMOVE);
+                      END;
+               VIOCELL = REJECT ¦¦ WORMCOLR;    /* FLAG REJECTED PATH */
+               API16RC = VIO16WRTCELLSTR(VIOCELL,2,TEMPROW,TEMPCOL,0);
+               END;
+
+
+                                    /* DELETE THE OPTION OF THIS PATH */
+          AUTODIRS = AUTODIRS - THISOPTN;
+          IF THISOPTN = ROK
+          THEN AUTODIRS = IAND(AUTODIRS,255-RGD);
+          IF THISOPTN = LOK
+          THEN AUTODIRS = IAND(AUTODIRS,255-LGD);
+          AUTOOPTS = AUTOOPTS - 1;
+          IF AUTOOPTS > 0           /* ANY ALTERNATIVES LEFT?         */
+          THEN GO TO PONDORNT;      /* YES, GO MODEL IT               */
+                                    /* NO, OOOEEE GOOOEEE             */
+          COLRCHAR = RED;           /* CONDITION RED: THE END IS NIGH */
+
+     /* DETERMINE CHOICE WHICH WILL BE A DEAD-END IN EXHAUSTIVE MODE. */
+     /* IN EXHAUSTIVE MODE, A SCORING DEAD-END HAS BEEN GIVEN A DEPTH */
+     /* OF 32767, SO A CHOICE BASED ON LONGEVITY WILL INCLUDE ANY     */
+     /* POSSIBLE SCORING.  IN LIMITED-STRATEGY MODE NOT ALL POSSIBLE  */
+     /* OUTCOMES HAVE BEEN EVALUATED, SO THE NOT-SCORING FUTURE MAY   */
+     /* REALLY LEAD TO SOME UNFORESEEN SCORING.  HENCE, FOR LIMITED-  */
+     /* STRATEGY MODE ALWAYS GO FOR LONGEVITY TO MAXIMIZE SURVIVAL.   */
+
+          IF POSPATHS(2).POSDEPTH > POSPATHS(1).POSDEPTH
+          THEN POSENTRY = 2;
+          ELSE POSENTRY = 1;
+          IF POSPATHS(3).POSDEPTH > POSPATHS(POSENTRY).POSDEPTH
+          THEN POSENTRY = 3;
+                                /* SUPPLY WORMOMATIC'S FINAL DECISION */
+          DIRCTION = POSPATHS(POSENTRY).POSAMOVE;
+          HOLDEPTH = POSPATHS(POSENTRY).POSDEPTH; /* MAXIMUM LIFETIME */
+          IF PRVDEPTH > HOLDEPTH + 1            /* ANY DRAMATIC DROP? */
+          THEN COLRCHAR = YELLOW;   /* CONDITION YELLOW: LOOKING SICK */
+          IF HOLDEPTH > TGTDEPTH    /* LONG LIFE AHEAD?               */
+          THEN COLRCHAR = GREEN;    /* YES, FORCE CONDITION GREEN     */
+          GO TO FRTNTELL;           /* GO TELL WORM'S FORTUNE         */
+
+ TAKEPATH:COLRCHAR = GREEN;     /* CONDITION GREEN: NO END IN SIGHT   */
+ TRUEBLUE:CALL UNDOTEST;        /* RESTORE BUFFER IMAGE               */
+          DIRCTION = AUTOMOVE;  /* SUPPLY WORMOMATIC'S FINAL DECISION */
+ FRTNTELL:FUTRMOVE = HOLDEPTH;  /* GET MIMIMUM MAXIMUM TIME LEFT      */
+          FUTRTEST = MOVECNTR;  /* GET FUTURE ITERATION COUNT         */
+          PRVDEPTH = HOLDEPTH;  /* SAVE FOR NEXT TIME                 */
+                                /* SHOW LIFE EXPECTANCY & TEST COUNT  */
+          COLORBIN = COLORBIN + '20'XN;  /* ADD DARK GREEN BACKGROUND */
+          SUBSTR(CHARBUFR,1,5) = FUTRMOVE;
+          SUBSTR(CHARBUFR,6,2) = '  ';
+          SUBSTR(CHARBUFR,8,10) = FUTRTEST;
+          API16RC =
+               VIO16WRTCHARSTRATT(CHARBUFR,17,LINES-1,43,COLRCHAR,0);
+
+          RETURN;               /* LOGICAL END OF WORMOMATIC ROUTINE  */
+          %PAGE;
+ UNDOTEST:PROCEDURE;                     /* UNDO TEST PROJECTIONS TO  */
+                              /* RESTORE TO THE CURRENT STATE OF PLAY */
+
+     DO WHILE (MOVDEPTH > 0);
+
+          SUBSTR(CHARBUFR,HEADTST,1) = TESTARAY(MOVDEPTH).HEADCHR;
+          TESTGROW = TESTARAY(MOVDEPTH).GROWNUM; /* RESTORE GROWTH    */
+          HEADTST = TESTARAY(MOVDEPTH).HEADPOS;  /* USE PREVIOUS HEAD */
+          SUBSTR(CHARBUFR,HEADTST,1) = '@';      /* RESTORE HEAD      */
+          TAILTST = TESTARAY(MOVDEPTH).TAILPOS;  /* USE PREVIOUS TAIL */
+          SUBSTR(CHARBUFR,TAILTST,1) = TESTARAY(MOVDEPTH).TAILCHR;
+
+          MOVDEPTH = MOVDEPTH - 1;
+
+          END;
+
+          IF DBUG
+          THEN DO;                       /* DUMP LATEST SCREEN BUFFER */
+               SUBSTR(CHARBUFR,1,1) = 'R';          /* RESTORE SCREEN */
+               FUTRMOVE = MOVDEPTH;
+               SUBSTR(CHARBUFR,18,5) = FUTRMOVE;
+               API16RC = VIO16WRTCHARSTRATT(CHARBUFR,1920,0,0,CYAN,0);
+               END;
+
+          END UNDOTEST;
+
+
+          END AUTOPLOT;
+          %PAGE;
+ PATHEVAL:                               /* DETERMINE AVAILABLE PATHS */
+          PROCEDURE (LOCATION,GROWTH,VACATING);
+
+          DCL LOCATION     FIXED BIN(15);
+          DCL GROWTH       FIXED BIN(31);
+          DCL VACATING     FIXED BIN(15);
+
+ REEVAL:  IF DBUG
+          THEN DO;
+               PUT SKIP DATA(DIRCOUNT, MOVDEPTH, LOCATION);
+               PUT SKIP LIST(HEX(DIRFLAGS));
+               PUT SKIP LIST(SUBSTR(CHARBUFR,LOCATION-COLUMNS-1,3));
+               PUT SKIP LIST(SUBSTR(CHARBUFR,LOCATION-1,3));
+               PUT SKIP LIST(SUBSTR(CHARBUFR,LOCATION+COLUMNS-1,3));
+               END;
+
+          DIRCOUNT = 0;
+          DIRFLAGS = 0;
+
+          IF LOCEVAL(LOCATION+1)                    /* EVALUATE RIGHT */
+          THEN DO;
+               DIRCOUNT = 1;
+               DIRFLAGS = ROK;
+               IF FOODCOL = COLUMNS - 2
+                ¦ SUBSTR(CHARBUFR,LOCATION+2,1) ^= BORDER
+               THEN DIRFLAGS = DIRFLAGS + RGD;
+               END;
+
+          IF LOCEVAL(LOCATION-1)                    /* EVALUATE LEFT  */
+          THEN DO;
+               DIRCOUNT = DIRCOUNT + 1;
+               DIRFLAGS = DIRFLAGS + LOK;
+               IF FOODCOL = 1
+                ¦ SUBSTR(CHARBUFR,LOCATION-2,1) ^= BORDER
+               THEN DIRFLAGS = DIRFLAGS + LGD;
+               END;
+
+          IF LOCEVAL(LOCATION+COLUMNS)              /* EVALUATE DOWN  */
+          THEN DO;
+               DIRCOUNT = DIRCOUNT + 1;
+               DIRFLAGS = DIRFLAGS + DOK;
+               END;
+
+          IF LOCEVAL(LOCATION-COLUMNS)              /* EVALUATE UP    */
+          THEN DO;
+               DIRCOUNT = DIRCOUNT + 1;
+               DIRFLAGS = DIRFLAGS + UOK;
+               END;
+
+          IF DIRCOUNT > 3
+          THEN DO;
+               IF DBUG THEN STOP;
+               DBUG = '1'B;
+               GO TO REEVAL;
+               END;
+
+          RETURN;
+          %PAGE;
+ LOCEVAL:                        /* EVALUATE THE STATUS OF A LOCATION */
+          PROCEDURE (L)  RETURNS (BIT(1));
+
+          DCL L            FIXED BIN(15);
+
+          IF DBUG
+          THEN DO;
+               PUT SKIP DATA(L);
+               PUT LIST(SUBSTR(CHARBUFR,L,1));
+               END;
+
+          IF L <= COLUMNS
+          THEN RETURN('0'B);                            /* TOP BORDER */
+
+          IF L > LASTLOOK
+          THEN RETURN('0'B);                         /* BOTTOM BORDER */
+
+          IF SUBSTR(CHARBUFR,L,1) = ' '
+          THEN DO;
+               IF DBUG THEN PUT LIST ('BLANK');
+               RETURN('1');                        /* VACANT LOCATION */
+               END;
+
+          IF SUBSTR(CHARBUFR,L,1) >= '1'
+           & SUBSTR(CHARBUFR,L,1) <= '9'
+          THEN DO;
+               IF DBUG THEN PUT LIST ('FOOD');
+               RETURN('1');                          /* FOOD LOCATION */
+               END;
+
+          IF SUBSTR(CHARBUFR,L,1) = BORDER
+          THEN RETURN('0');                            /* SIDE BORDER */
+
+          IF GROWTH > 0         /* ANY CHANCE TAIL WILL LEAVE A SPOT? */
+          THEN RETURN('0');              /* NO, THIS SPOT IS OCCUPIED */
+
+          IF L = VACATING            /* WILL THE TAIL MOVE FROM HERE? */
+          THEN DO;
+               IF DBUG THEN PUT LIST ('TAIL');
+               FOLLOWME = '1'B;
+               RETURN('1');                    /* YES, THAT WAS CLOSE */
+               END;
+
+          RETURN('0'B);                      /* OCCUPIED BY WORM BODY */
+
+          END LOCEVAL;
+
+
+
+          END PATHEVAL;
+          %PAGE;
+ FAREWELL:                             /* SHOW TERMINATION STATISTICS */
+          PROCEDURE;
+
+          VIOLINE = 'FAREWELL....';
+          SUBSTR(VIOLINE,13,2) = '0D0A'X;
+          API16RC = VIO16WRTTTY(VIOLINE,14,0);
+          VIOLINE = 'AGAIN....';
+          API16RC = VIO16WRTTTY(VIOLINE,14,0);
+
+          END FAREWELL;
+          %PAGE;
+ SHOWFAIL:                       /* SHOW ERROR SCENARIO FOR DIAGNOSIS */
+          PROCEDURE (ERRNMBR,ERRDATA);
+
+          DCL ERRNMBR  CHAR(1);       /* ERROR NUMBER INPUT PARAMETER */
+          DCL ERRDATA  CHAR(1);       /* UNEXPECTED DATA TO DISPLAY   */
+
+          CALL DOSSLEEP(2000);
+          I = COLUMNS * LINES;               /* GET TOTAL SCREEN SIZE */
+
+          SUBSTR(CHARBUFR,I-3,1) = ERRNMBR;    /* INSERT ERROR NUMBER */
+          SUBSTR(CHARBUFR,I-2,1) = ':';        /* INSERT DATUM LINK   */
+          SUBSTR(CHARBUFR,I-1,1) = ERRDATA;    /* INSERT ERROR DATUM  */
+
+          PUT STRING(VIOLINE) EDIT (MOVDEPTH) (F(5));
+          SUBSTR(CHARBUFR,41,5) = SUBSTR(VIOLINE,1,5);
+          PUT STRING(VIOLINE) EDIT (DIRCOUNT) (F(5));
+          SUBSTR(CHARBUFR,41,5) = SUBSTR(VIOLINE,1,5);
+          PUT STRING(VIOLINE) EDIT (DIRCOUNT) (F(5));
+          SUBSTR(CHARBUFR,47,5) = SUBSTR(VIOLINE,1,5);
+          SUBSTR(CHARBUFR,50,2) = HEX(DIRFLAGS);
+                                         /* DUMP LATEST SCREEN BUFFER */
+          API16RC = VIO16WRTCHARSTRATT(CHARBUFR,1920,0,0,RED,0);
+
+          API16RC = KBD16CHARIN(KBDDATA,IO_WAIT,0);
+          IF API16RC > 0 THEN PUT SKIP DATA(API16RC);
+
+          STOP;                                   /* STOP THE PROGRAM */
+
+          END SHOWFAIL;
+
+
+          END WORM;
+
